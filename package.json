@@ -2,7 +2,10 @@
   "name": "file-store-csv-example",
   "private": true,
   "scripts": {
-    "build": "rm -rf lib && tsc"
+    "build": "rm -rf lib && tsc",
+    "analyze": "node analyze-balances.js",
+    "analyze:top": "node analyze-balances.js top",
+    "analyze:stats": "node analyze-balances.js stats"
   },
   "dependencies": {
     "@subsquid/evm-abi": "^0.3.0",
