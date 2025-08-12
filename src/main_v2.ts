@@ -9,37 +9,86 @@ function getEnvArray(name: string): string[] {
   const v = process.env[name]
   return v ? v.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean) : []
 }
+function splitCsvLine(line: string): string[] {
+  const out: string[] = []
+  let cur = ''
+  let inQuotes = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (ch === '"') {
+      // handle escaped quotes
+      if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; continue }
+      inQuotes = !inQuotes
+    } else if (ch === ',' && !inQuotes) {
+      out.push(cur)
+      cur = ''
+    } else {
+      cur += ch
+    }
+  }
+  out.push(cur)
+  return out
+}
+
+function parseCsvRows(content: string): string[][] {
+  const rows: string[][] = []
+  let cur: string[] = []
+  let field = ''
+  let inQuotes = false
+  for (let i = 0; i < content.length; i++) {
+    const ch = content[i]
+    if (ch === '"') {
+      if (inQuotes && content[i + 1] === '"') { field += '"'; i++; continue }
+      inQuotes = !inQuotes
+    } else if (ch === ',' && !inQuotes) {
+      cur.push(field)
+      field = ''
+    } else if ((ch === '\n' || ch === '\r') && !inQuotes) {
+      if (ch === '\r' && content[i + 1] === '\n') i++
+      cur.push(field)
+      rows.push(cur)
+      cur = []
+      field = ''
+    } else {
+      field += ch
+    }
+  }
+  // flush last field/row
+  cur.push(field)
+  rows.push(cur)
+  return rows
+}
+
 function readPairsFile(path?: string): string[] {
   if (!path) return []
   try {
     const fs = require('fs') as typeof import('fs')
     if (!fs.existsSync(path)) return []
     const content = fs.readFileSync(path, 'utf8')
-    const lines = content.split(/\r?\n/).filter((l: string) => l.trim().length > 0)
-    if (lines.length === 0) return []
+    const rows = parseCsvRows(content)
+    if (rows.length === 0) return []
 
     // Try CSV with header containing lpAddress (case-insensitive)
-    if (lines[0].includes(',')) {
-      const headers = lines[0]
-        .split(',')
-        .map((h: string) => h.trim().replace(/^"|"$/g, '').toLowerCase())
+    if (rows[0].length > 1) {
+      const headers = rows[0].map((h: string) => h.trim().replace(/^"|"$/g, '').toLowerCase())
       const candidates = ['lpaddress', 'pair', 'pairaddress', 'address', 'pool', 'pooladdress']
       const addrIdx = headers.findIndex((h: string) => candidates.includes(h))
       if (addrIdx >= 0) {
         const addrs: string[] = []
-        for (let i = 1; i < lines.length; i++) {
-          const cols = lines[i].split(',').map((c: string) => c.trim())
+        for (let i = 1; i < rows.length; i++) {
+          const cols = rows[i].map((c: string) => c.trim())
           const raw = (cols[addrIdx] || '').replace(/^"|"$/g, '').toLowerCase()
           if (/^0x[a-f0-9]{40}$/.test(raw)) addrs.push(raw)
         }
-        return addrs
+        return Array.from(new Set(addrs))
       }
     }
 
     // Fallback: one address per line
-    return lines
+    const lines = content.split(/\r?\n/)
+    return Array.from(new Set(lines
       .map((l: string) => l.trim().replace(/^"|"$/g, '').toLowerCase())
-      .filter((l: string) => /^0x[a-f0-9]{40}$/.test(l))
+      .filter((l: string) => /^0x[a-f0-9]{40}$/.test(l))))
   } catch {
     return []
   }

@@ -5,7 +5,9 @@
     "build": "rm -rf lib && tsc",
     "analyze": "node analyze-balances.js",
     "analyze:top": "node analyze-balances.js top",
-    "analyze:stats": "node analyze-balances.js stats"
+    "analyze:stats": "node analyze-balances.js stats",
+    "metrics:build-meta": "node lib/analysis/build_pairs_meta.js",
+    "metrics:aggregate": "node lib/analysis/aggregate_metrics.js"
   },
   "dependencies": {
     "@subsquid/evm-abi": "^0.3.0",

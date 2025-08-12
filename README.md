@@ -53,6 +53,24 @@ node lib/main_v2.js | cat
 
 ### Output
 - `v2_swaps.csv`: `blockNumber,timestamp,eventId,pair,amount0In,amount1In,amount0Out,amount1Out`
+
+## Analysis scripts
+
+Daily metrics (price, volume, unique traders, market cap) using a Virtual→USD timeseries:
+```bash
+# 1) Build latest reserves snapshot (optional, improves price proxy)
+RUN_ID=<run> npm run metrics:build-meta
+
+# 2) If you have a daily CSV of Virtual in USD (ts,virt_usd):
+RUN_ID=<run> VIRT_USD_CSV=/abs/path/virt_usd_daily.csv SUPPLY=1000000000 node lib/analysis/per_day_metrics.js
+
+# 3) Alternatively, aggregate static snapshot metrics with a single USD price:
+RUN_ID=<run> VIRTUAL_PRICE_USD=1.00 SUPPLY=1000000000 npm run metrics:aggregate
+```
+
+Outputs:
+- `data/<run>/pair_day_metrics.csv`: daily per pair price_in_virtual, price_usd, marketcap_usd, swaps, unique_traders, volume_virtual.
+- `data/<run>/pair_metrics.csv`: snapshot-level metrics using reserves or swap flow proxy.
 - `v2_mints.csv`: `blockNumber,timestamp,eventId,pair,amount0,amount1`
 - `v2_burns.csv`: `blockNumber,timestamp,eventId,pair,amount0,amount1`
 - `v2_sync.csv`: `blockNumber,timestamp,eventId,pair,reserve0,reserve1`
