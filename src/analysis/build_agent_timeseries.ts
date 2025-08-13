@@ -73,20 +73,19 @@ const virtUsdByDay = new Map<number, number>()
   }
 }
 
-// Load token meta mapping pair -> agent and decimals
+// Optional token meta mapping pair -> agent and decimals
 const tokenMetaPath = path.join(runDir, 'token_meta.csv')
-if (!fs.existsSync(tokenMetaPath)) { console.error(`Missing ${tokenMetaPath}. Run build_token_meta first.`); process.exit(1) }
 type Meta = { agent: string; agentDec: number; virtual: string; virtualDec: number; token0: string; token1: string }
 const pairToMeta = new Map<string, Meta>()
-{
+if (fs.existsSync(tokenMetaPath)) {
   const lines = fs.readFileSync(tokenMetaPath, 'utf8').trim().split(/\r?\n/)
   lines.shift()
   for (const line of lines) {
     const [pair,token0,token1,decimals0,decimals1,agent,agent_decimals,virtual,virtual_decimals] = line.split(',')
     pairToMeta.set(pair.toLowerCase(), {
-      agent: agent.toLowerCase(), agentDec: Number(agent_decimals),
-      virtual: virtual.toLowerCase(), virtualDec: Number(virtual_decimals),
-      token0: token0.toLowerCase(), token1: token1.toLowerCase()
+      agent: (agent || '').toLowerCase(), agentDec: Number(agent_decimals || '18'),
+      virtual: (virtual || '').toLowerCase(), virtualDec: Number(virtual_decimals || '18'),
+      token0: (token0 || '').toLowerCase(), token1: (token1 || '').toLowerCase()
     })
   }
 }
@@ -100,27 +99,41 @@ for (const f of listFiles(runDir, 'v2_swaps.csv')) {
   for (const line of lines) {
     const [blockNumber,timestamp,eventId,pair,sender,to,a0in,a1in,a0out,a1out] = line.split(',')
     const meta = pairToMeta.get((pair || '').toLowerCase())
-    if (!meta) continue
     const tsMs = Number(timestamp)
     if (!Number.isFinite(tsMs)) continue
     const dayTs = toDayTs(tsMs)
-    const m = perAgentDay.get(meta.agent) || new Map<number, DayAgg>()
+    // Determine agent id and scaling
+    let agentId: string
+    let scaleAgent = 1e18
+    let scaleVirtual = 1e18
+    // Default orientation when token meta is missing: Virtual is token0, Agent is token1
+    let t0IsAgent = false
+    if (meta && meta.agent) {
+      agentId = meta.agent
+      scaleAgent = Math.pow(10, meta.agentDec || 18)
+      scaleVirtual = Math.pow(10, meta.virtualDec || 18)
+      t0IsAgent = meta.token0 === meta.agent
+    } else {
+      // No meta: assume token0 = Virtual (18), token1 = Agent (18)
+      agentId = (pair || '').toLowerCase() // use pair as filename key when agent unknown
+      scaleAgent = 1e18
+      scaleVirtual = 1e18
+      t0IsAgent = false
+    }
+    const m = perAgentDay.get(agentId) || new Map<number, DayAgg>()
     const a = m.get(dayTs) || {swaps: 0, unique: new Set<string>(), sumAgent: 0, sumVirtual: 0, volVirtual: 0}
     a.swaps += 1
     a.unique.add(sender)
     a.unique.add(to)
     const nA0in = Number(a0in), nA1in = Number(a1in), nA0out = Number(a0out), nA1out = Number(a1out)
-    // Normalize by decimals
-    const scale0 = 10 ** (meta.token0 === meta.agent ? meta.agentDec : meta.virtualDec)
-    const scale1 = 10 ** (meta.token1 === meta.agent ? meta.agentDec : meta.virtualDec)
-    const t0Agent = meta.token0 === meta.agent
-    const agentAmt = t0Agent ? Math.max(nA0in || 0, nA0out || 0) / scale0 : Math.max(nA1in || 0, nA1out || 0) / scale1
-    const virtAmt  = t0Agent ? Math.max(nA1in || 0, nA1out || 0) / scale1 : Math.max(nA0in || 0, nA0out || 0) / scale0
+    // Normalize by assumed decimals and orientation
+    const agentAmt = t0IsAgent ? Math.max(nA0in || 0, nA0out || 0) / scaleAgent : Math.max(nA1in || 0, nA1out || 0) / scaleAgent
+    const virtAmt  = t0IsAgent ? Math.max(nA1in || 0, nA1out || 0) / scaleVirtual : Math.max(nA0in || 0, nA0out || 0) / scaleVirtual
     a.sumAgent += agentAmt
     a.sumVirtual += virtAmt
     a.volVirtual += virtAmt
     m.set(dayTs, a)
-    perAgentDay.set(meta.agent, m)
+    perAgentDay.set(agentId, m)
   }
 }
 
@@ -134,8 +147,12 @@ for (const [agent, byDay] of perAgentDay) {
     const rec = byDay.get(d)!
     swapsCum += rec.swaps
     rec.unique.forEach((u) => seen.add(u))
-    const vwap = rec.sumAgent > 0 ? rec.sumVirtual / rec.sumAgent : 0
+    let vwap = rec.sumAgent > 0 ? rec.sumVirtual / rec.sumAgent : 0
     const virtUsd = virtUsdByDay.get(d) || 0
+    // sanity inversion if absurd
+    if (vwap > 0 && (vwap < 1e-18 || vwap > 1e18)) {
+      vwap = rec.sumVirtual > 0 ? rec.sumAgent / rec.sumVirtual : vwap
+    }
     const priceUsd = vwap * virtUsd
     const mcap = SUPPLY * priceUsd
     const volUsd = rec.volVirtual * virtUsd

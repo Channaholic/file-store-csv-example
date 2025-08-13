@@ -74,9 +74,42 @@ const virtUsdByDay = new Map<number, number>()
   }
 }
 
+// Load token metadata to determine which side is Virtual vs Agent and apply decimals
+const tokenMetaPath = path.join(runDir, 'token_meta.csv')
+type TokenMeta = {
+  agent: string
+  agentDec: number
+  virtual: string
+  virtualDec: number
+  token0?: string
+  token1?: string
+  dec0?: number
+  dec1?: number
+}
+const meta = new Map<string, TokenMeta>()
+if (fs.existsSync(tokenMetaPath)) {
+  const lines = fs.readFileSync(tokenMetaPath, 'utf8').trim().split(/\r?\n/)
+  lines.shift()
+  for (const line of lines) {
+    const [pair,token0,token1,decimals0,decimals1,agent,agent_decimals,virtual,virtual_decimals] = line.split(',')
+    meta.set(pair.toLowerCase(), {
+      agent: (agent || '').toLowerCase(),
+      agentDec: Number(agent_decimals || '18'),
+      virtual: (virtual || '').toLowerCase(),
+      virtualDec: Number(virtual_decimals || '18'),
+      token0: (token0 || '').toLowerCase(),
+      token1: (token1 || '').toLowerCase(),
+      dec0: Number(decimals0 || '18'),
+      dec1: Number(decimals1 || '18')
+    })
+  }
+}
+
 // Aggregation per pair/day
 // We compute a VWAP-like price_agent_in_virtual = sum(virtual_amount) / sum(agent_amount)
-// using swap legs.
+// using swap legs. Amounts are normalized to token units (apply decimals) and use
+// token orientation from token_meta when available. Fallback assumes Virtual is token0,
+// Agent is token1 (your case).
 
 type DayAgg = {
   swaps: number
@@ -102,34 +135,52 @@ for (const f of listFiles(runDir, 'v2_swaps.csv')) {
     a.unique.add(sender)
     a.unique.add(to)
     const nA0in = Number(a0in), nA1in = Number(a1in), nA0out = Number(a0out), nA1out = Number(a1out)
-    if (Number.isFinite(nA1in) && Number.isFinite(nA0out) && nA1in > 0 && nA0out > 0) {
-      a.sumVirtual += nA1in
-      a.sumAgent += nA0out
-    } else if (Number.isFinite(nA1out) && Number.isFinite(nA0in) && nA1out > 0 && nA0in > 0) {
-      a.sumVirtual += nA1out
-      a.sumAgent += nA0in
-    }
-    // volume proxy in virtual units
-    a.volVirtual += Math.max(nA1in || 0, nA1out || 0)
-    agg.set(key, a)
-  }
-}
 
-// Optional token metadata to apply decimals and orientation
-const tokenMetaPath = path.join(runDir, 'token_meta.csv')
-const meta = new Map<string, {agent: string; agentDec: number; virtual: string; virtualDec: number; token0?: string; token1?: string; dec0?: number; dec1?: number}>()
-if (fs.existsSync(tokenMetaPath)) {
-  const lines = fs.readFileSync(tokenMetaPath, 'utf8').trim().split(/\r?\n/)
-  lines.shift()
-  for (const line of lines) {
-    const [pair,token0,token1,decimals0,decimals1,agent,agent_decimals,virtual,virtual_decimals] = line.split(',')
-    meta.set(pair.toLowerCase(), {
-      agent: agent.toLowerCase(),
-      agentDec: Number(agent_decimals),
-      virtual: virtual.toLowerCase(),
-      virtualDec: Number(virtual_decimals),
-      token0: token0.toLowerCase(), token1: token1.toLowerCase(), dec0: Number(decimals0), dec1: Number(decimals1)
-    })
+    const m = meta.get((pair || '').toLowerCase())
+    // Orientation: by default Virtual is token0 and Agent is token1
+    const virtualIsToken0 = m ? (m.token0 === m.virtual) : true
+    const agentDecimals = m?.agentDec ?? 18
+    const virtualDecimals = m?.virtualDec ?? 18
+
+    let tradeVirtualRaw = 0
+    let tradeAgentRaw = 0
+    // Two possible swap directions on V2
+    if (Number.isFinite(nA1in) && Number.isFinite(nA0out) && nA1in > 0 && nA0out > 0) {
+      // token1 in, token0 out
+      if (virtualIsToken0) {
+        tradeVirtualRaw = nA0out
+        tradeAgentRaw = nA1in
+      } else {
+        tradeVirtualRaw = nA1in
+        tradeAgentRaw = nA0out
+      }
+    } else if (Number.isFinite(nA1out) && Number.isFinite(nA0in) && nA1out > 0 && nA0in > 0) {
+      // token0 in, token1 out
+      if (virtualIsToken0) {
+        tradeVirtualRaw = nA0in
+        tradeAgentRaw = nA1out
+      } else {
+        tradeVirtualRaw = nA1out
+        tradeAgentRaw = nA0in
+      }
+    } else {
+      // Fallback: use max sides respecting orientation (less accurate but robust)
+      if (virtualIsToken0) {
+        tradeVirtualRaw = Math.max(nA0in || 0, nA0out || 0)
+        tradeAgentRaw = Math.max(nA1in || 0, nA1out || 0)
+      } else {
+        tradeVirtualRaw = Math.max(nA1in || 0, nA1out || 0)
+        tradeAgentRaw = Math.max(nA0in || 0, nA0out || 0)
+      }
+    }
+
+    const tradeVirtualUnits = tradeVirtualRaw / 10 ** virtualDecimals
+    const tradeAgentUnits = tradeAgentRaw / 10 ** agentDecimals
+
+    a.sumVirtual += tradeVirtualUnits
+    a.sumAgent += tradeAgentUnits
+    a.volVirtual += tradeVirtualUnits
+    agg.set(key, a)
   }
 }
 
@@ -137,19 +188,8 @@ const outLines = ['day_ts,pair,swaps,unique_traders,volume_virtual,price_agent_i
 for (const [key, a] of agg) {
   const [pair, dayTsStr] = key.split('|')
   const dayTs = Number(dayTsStr)
-  // Apply decimals if token meta is available
-  const m = meta.get(pair)
+  // We already normalized units by decimals during aggregation
   let vwap = a.sumAgent > 0 ? a.sumVirtual / a.sumAgent : 0
-  if (m && Number.isFinite(m.agentDec) && Number.isFinite(m.virtualDec) && vwap > 0) {
-    // amounts above were raw; normalize to token units
-    // sumVirtual (token1 units), sumAgent (token0 units) if agent is token0; otherwise inverse
-    if (m.token0 && m.agent === m.token0) {
-      vwap = (a.sumVirtual / 10**(m.virtualDec || 0)) / (a.sumAgent / 10**(m.agentDec || 0))
-    } else {
-      // when agent is token1, vwap computed as virtual/agent; still fine with decimals applied
-      vwap = (a.sumVirtual / 10**(m.virtualDec || 0)) / (a.sumAgent / 10**(m.agentDec || 0))
-    }
-  }
   const virtUsd = virtUsdByDay.get(dayTs) || 0
   const priceUsd = vwap * virtUsd
   const mcap = SUPPLY * priceUsd
